@@ -150,4 +150,72 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.message.reply_text("Я пока не знаю, что делать с этой кнопкой 🤔")
 
 
-# ========== У
+# ========== Упоминания ==========
+
+def _mentioned_me(update: Update, bot_username_lower: Optional[str]) -> bool:
+    if not update.message or not bot_username_lower:
+        return False
+    if update.message.entities:
+        text = update.message.text or ""
+        for ent in update.message.entities:
+            if ent.type in (MessageEntityType.MENTION, MessageEntityType.TEXT_MENTION):
+                mention_text = text[ent.offset: ent.offset + ent.length].lower()
+                if mention_text in (f"@{bot_username_lower}", bot_username_lower):
+                    return True
+    text_lower = (update.message.text or "").lower()
+    return f"@{bot_username_lower}" in text_lower or bot_username_lower in text_lower
+
+
+async def mention_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if _mentioned_me(update, BOT_USERNAME_LOWER):
+        await update.message.reply_text("Привет!", reply_markup=make_menu_keyboard())
+
+
+# ========== MAIN (обновлённый, безопасный для Render) ==========
+
+async def main() -> None:
+    global BOT_USERNAME_LOWER
+
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    # Команды
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("list", list_cmd))
+    app.add_handler(CommandHandler("list2", list2_cmd))
+    app.add_handler(CommandHandler("whoami", whoami_cmd))
+    app.add_handler(CommandHandler("addquote", addquote_cmd))
+
+    # Фото после /addquote
+    app.add_handler(MessageHandler(filters.PHOTO, quote_photo_handler))
+
+    # Callback-кнопки
+    app.add_handler(CallbackQueryHandler(on_button))
+
+    # Упоминания
+    app.add_handler(
+        MessageHandler(
+            (filters.TEXT & ~filters.COMMAND)
+            | filters.Entity(MessageEntityType.MENTION)
+            | filters.Entity(MessageEntityType.TEXT_MENTION),
+            mention_handler,
+        )
+    )
+
+    me = await app.bot.get_me()
+    BOT_USERNAME_LOWER = me.username.lower() if me and me.username else None
+    logging.info(f"Bot username: @{me.username}")
+    logging.info("✅ Бот запускается. Жду апдейтов...")
+
+    await app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+
