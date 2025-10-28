@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
-# Запускаем твоего бота
+pip install --upgrade --force-reinstall "python-telegram-bot==20.8"
 python AXecutorBot.py
