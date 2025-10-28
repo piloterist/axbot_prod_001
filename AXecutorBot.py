@@ -320,17 +320,13 @@ async def main() -> None:
 
     # Снимаем вебхук и запускаем polling
     await app.bot.delete_webhook(drop_pending_updates=True)
-    await app.updater.start_polling()
     logging.info("📡 Polling запущен.")
-
     try:
-        # Держим процесс живым
-        await asyncio.Future()
+        await app.run_polling()
     except asyncio.CancelledError:
         pass
     finally:
         logging.info("⏹ Остановка…")
-        await app.updater.stop()
         await app.stop()
         await app.shutdown()
 
