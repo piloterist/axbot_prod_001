@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
-pip install --upgrade --force-reinstall "python-telegram-bot==20.8"
+echo "🚀 Starting AXecutorBot on Render..."
 python AXecutorBot.py
