@@ -59,6 +59,7 @@ def get_today_quote_file_id() -> Optional[str]:
     quotes = load_quotes()
     if not quotes:
         return None
+    # детерминируем картинку на день
     today_str = datetime.date.today().isoformat()
     digest = hashlib.sha256(today_str.encode("utf-8")).digest()
     num = int.from_bytes(digest[:4], byteorder="big")
@@ -83,16 +84,20 @@ async def quote_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not context.user_data.get("waiting_for_quote_photo"):
         await update.message.reply_text("Чтобы добавить цитату, сначала напиши /addquote.")
         return
+
     photos = update.message.photo
     if not photos:
         await update.message.reply_text("Мне нужна именно КАРТИНКА как фото, не документ и не стикер 🙂")
         return
-    file_id = photos[-1].file_id
+
+    file_id = photos[-1].file_id  # самое большое фото
     quotes = load_quotes()
+
     if file_id in quotes:
         await update.message.reply_text("Эта цитата уже есть в базе 👌")
         context.user_data["waiting_for_quote_photo"] = False
         return
+
     quotes.append(file_id)
     save_quotes(quotes)
     context.user_data["waiting_for_quote_photo"] = False
@@ -155,6 +160,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def _mentioned_me(update: Update, bot_username_lower: Optional[str]) -> bool:
     if not update.message or not bot_username_lower:
         return False
+
+    # сначала проверим entities
     if update.message.entities:
         text = update.message.text or ""
         for ent in update.message.entities:
@@ -162,6 +169,8 @@ def _mentioned_me(update: Update, bot_username_lower: Optional[str]) -> bool:
                 mention_text = text[ent.offset: ent.offset + ent.length].lower()
                 if mention_text in (f"@{bot_username_lower}", bot_username_lower):
                     return True
+
+    # потом просто по тексту
     text_lower = (update.message.text or "").lower()
     return f"@{bot_username_lower}" in text_lower or bot_username_lower in text_lower
 
@@ -171,9 +180,13 @@ async def mention_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("Привет!", reply_markup=make_menu_keyboard())
 
 
-# ========== MAIN (обновлённый, безопасный для Render) ==========
+# ========== Создание и запуск приложения ==========
 
-async def main() -> None:
+async def prepare_app():
+    """
+    Асинхронно создаём и настраиваем приложение.
+    Это отдельная функция, чтобы потом запустить run_polling синхронно.
+    """
     global BOT_USERNAME_LOWER
 
     app = (
@@ -205,17 +218,27 @@ async def main() -> None:
         )
     )
 
+    # узнаём username
     me = await app.bot.get_me()
     BOT_USERNAME_LOWER = me.username.lower() if me and me.username else None
     logging.info(f"Bot username: @{me.username}")
     logging.info("✅ Бот запускается. Жду апдейтов...")
 
-    await app.run_polling(drop_pending_updates=True)
+    return app
+
+
+def main():
+    """
+    Синхронная обёртка, чтобы не было конфликта event loop на Render.
+    """
+    loop = asyncio.get_event_loop()
+    app = loop.run_until_complete(prepare_app())
+    # дальше библиотека сама управляет своим циклом
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         pass
-
