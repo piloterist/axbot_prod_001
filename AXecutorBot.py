@@ -6,6 +6,10 @@ from typing import Optional, List
 import json
 from pathlib import Path
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from openai import AsyncOpenAI
+from contextlib import suppress
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import MessageEntityType
@@ -26,6 +30,9 @@ BOT_TOKEN = os.getenv(
     "BOT_TOKEN",
     "7737583178:AAGv4gBqf_DP2ZjQqrCLWZtIGmiKYYk-LsY"
 )
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+TG_LIMIT = 4096
 
 DOC_URL = "https://docs.google.com/spreadsheets/d/1YmUKSPDKvB8PWE2t2dC-dGy4vk4-9Jl-sWu8pRjknSo/edit?usp=sharing"
 DOC2_URL = "https://docs.google.com/spreadsheets/d/1HfuY20ysxFNBdfhfkBAFy9ULhH68oQtSKMB-Ljp5xgo/edit?usp=sharing"
@@ -39,6 +46,32 @@ BUTTON5_TEXT = "Цитата дня"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 BOT_USERNAME_LOWER: Optional[str] = None
+
+# ========== Простой HTTP-сервер для Render ==========
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        # можно сделать простую проверку /health
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    # чтобы не засорять логи Render'а
+    def log_message(self, format, *args):
+        return
+
+
+def start_http_server():
+    """
+    Запускаем самый простой HTTP-сервер, чтобы Render видел открытый порт.
+    Порт возьмём из переменной PORT (Render её подставляет), иначе 10000.
+    """
+    port = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    logging.info(f"🌐 HTTP health server started on 0.0.0.0:{port}")
+    server.serve_forever()
+
 
 # ========== Работа с цитатами ==========
 
@@ -59,7 +92,6 @@ def get_today_quote_file_id() -> Optional[str]:
     quotes = load_quotes()
     if not quotes:
         return None
-    # детерминируем картинку на день
     today_str = datetime.date.today().isoformat()
     digest = hashlib.sha256(today_str.encode("utf-8")).digest()
     num = int.from_bytes(digest[:4], byteorder="big")
@@ -67,6 +99,46 @@ def get_today_quote_file_id() -> Optional[str]:
     return quotes[idx]
 
 # ========== Команды ==========
+async def send_long_text(update_or_message, text: str):
+    msg = update_or_message.message if hasattr(update_or_message, "message") else update_or_message
+    for i in range(0, len(text), TG_LIMIT):
+        with suppress(Exception):
+            await msg.reply_text(text[i:i+TG_LIMIT])
+
+async def ask_gipi(prompt: str, sys: str = "You are Gipi, a concise and friendly assistant. Answer in Russian by default.") -> str:
+    if not client:
+        return "❗️ OpenAI ключ не настроен на сервере."
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"system","content":sys},{"role":"user","content":prompt}],
+            temperature=0.3,
+            max_tokens=1200,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"⚠️ Ошибка при обращении к модели: {e}"
+async def ask_cmd(update, context):
+    parts = (update.message.text or "").split(maxsplit=1)
+    if len(parts) > 1:
+        await update.message.chat.send_action("typing")
+        answer = await ask_gipi(parts[1])
+        await send_long_text(update, answer)
+        return
+    context.user_data["awaiting_ask_text"] = True
+    await update.message.reply_text("Окей, напиши вопрос одним следующим сообщением.")
+
+async def ask_followup_text(update, context):
+    if context.user_data.get("awaiting_ask_text"):
+        context.user_data["awaiting_ask_text"] = False
+        q = (update.message.text or "").strip()
+        if not q:
+            await update.message.reply_text("Пустой вопрос. Попробуй ещё раз: /ask")
+            return
+        await update.message.chat.send_action("typing")
+        answer = await ask_gipi(q)
+        await send_long_text(update, answer)
+
 
 async def addquote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -90,7 +162,7 @@ async def quote_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Мне нужна именно КАРТИНКА как фото, не документ и не стикер 🙂")
         return
 
-    file_id = photos[-1].file_id  # самое большое фото
+    file_id = photos[-1].file_id
     quotes = load_quotes()
 
     if file_id in quotes:
@@ -161,7 +233,6 @@ def _mentioned_me(update: Update, bot_username_lower: Optional[str]) -> bool:
     if not update.message or not bot_username_lower:
         return False
 
-    # сначала проверим entities
     if update.message.entities:
         text = update.message.text or ""
         for ent in update.message.entities:
@@ -170,7 +241,6 @@ def _mentioned_me(update: Update, bot_username_lower: Optional[str]) -> bool:
                 if mention_text in (f"@{bot_username_lower}", bot_username_lower):
                     return True
 
-    # потом просто по тексту
     text_lower = (update.message.text or "").lower()
     return f"@{bot_username_lower}" in text_lower or bot_username_lower in text_lower
 
@@ -183,10 +253,6 @@ async def mention_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ========== Создание и запуск приложения ==========
 
 async def prepare_app():
-    """
-    Асинхронно создаём и настраиваем приложение.
-    Это отдельная функция, чтобы потом запустить run_polling синхронно.
-    """
     global BOT_USERNAME_LOWER
 
     app = (
@@ -196,11 +262,14 @@ async def prepare_app():
     )
 
     # Команды
+    app.add_handler(CommandHandler("ask", ask_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ask_followup_text))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("list2", list2_cmd))
     app.add_handler(CommandHandler("whoami", whoami_cmd))
     app.add_handler(CommandHandler("addquote", addquote_cmd))
+
 
     # Фото после /addquote
     app.add_handler(MessageHandler(filters.PHOTO, quote_photo_handler))
@@ -218,7 +287,6 @@ async def prepare_app():
         )
     )
 
-    # узнаём username
     me = await app.bot.get_me()
     BOT_USERNAME_LOWER = me.username.lower() if me and me.username else None
     logging.info(f"Bot username: @{me.username}")
@@ -228,12 +296,15 @@ async def prepare_app():
 
 
 def main():
-    """
-    Синхронная обёртка, чтобы не было конфликта event loop на Render.
-    """
+    # 1. поднимем http-сервер в отдельном потоке
+    t = threading.Thread(target=start_http_server, daemon=True)
+    t.start()
+
+    # 2. подготовим телеграм-приложение
     loop = asyncio.get_event_loop()
     app = loop.run_until_complete(prepare_app())
-    # дальше библиотека сама управляет своим циклом
+
+    # 3. запустим polling (блокирующий)
     app.run_polling(drop_pending_updates=True)
 
 
