@@ -262,14 +262,14 @@ async def prepare_app():
     )
 
     # Команды
-    app.add_handler(CommandHandler("ask", ask_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ask_followup_text))
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("list2", list2_cmd))
     app.add_handler(CommandHandler("whoami", whoami_cmd))
     app.add_handler(CommandHandler("addquote", addquote_cmd))
-
+    app.add_handler(CommandHandler("ask", ask_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ask_followup_text))
 
     # Фото после /addquote
     app.add_handler(MessageHandler(filters.PHOTO, quote_photo_handler))
