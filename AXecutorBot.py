@@ -110,7 +110,7 @@ async def ask_gipi(prompt: str, sys: str = "You are Gipi, a concise and friendly
         return "❗️ OpenAI ключ не настроен на сервере."
     try:
         resp = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=[{"role":"system","content":sys},{"role":"user","content":prompt}],
             temperature=0.3,
             max_tokens=1200,
