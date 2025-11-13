@@ -269,23 +269,25 @@ async def prepare_app():
     app.add_handler(CommandHandler("whoami", whoami_cmd))
     app.add_handler(CommandHandler("addquote", addquote_cmd))
     app.add_handler(CommandHandler("ask", ask_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ask_followup_text))
+
+    # Упоминания — обрабатываем ВСЕ текстовые сообщения без команд,
+    # а внутри _mentioned_me уже решаем, есть ли имя бота
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, mention_handler),
+        group=0,
+    )
+
+    # Текст для /ask — идёт вторым слоем
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, ask_followup_text),
+        group=1,
+    )
 
     # Фото после /addquote
     app.add_handler(MessageHandler(filters.PHOTO, quote_photo_handler))
 
     # Callback-кнопки
     app.add_handler(CallbackQueryHandler(on_button))
-
-    # Упоминания
-    app.add_handler(
-    MessageHandler(
-        filters.Entity(MessageEntityType.MENTION) | filters.Entity(MessageEntityType.TEXT_MENTION),
-        mention_handler,
-    ),
-    group=0
-)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ask_followup_text), group=1)
 
     me = await app.bot.get_me()
     BOT_USERNAME_LOWER = me.username.lower() if me and me.username else None
