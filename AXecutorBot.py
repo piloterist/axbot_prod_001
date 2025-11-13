@@ -279,13 +279,13 @@ async def prepare_app():
 
     # Упоминания
     app.add_handler(
-        MessageHandler(
-            (filters.TEXT & ~filters.COMMAND)
-            | filters.Entity(MessageEntityType.MENTION)
-            | filters.Entity(MessageEntityType.TEXT_MENTION),
-            mention_handler,
-        )
-    )
+    MessageHandler(
+        filters.Entity(MessageEntityType.MENTION) | filters.Entity(MessageEntityType.TEXT_MENTION),
+        mention_handler,
+    ),
+    group=0
+)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ask_followup_text), group=1)
 
     me = await app.bot.get_me()
     BOT_USERNAME_LOWER = me.username.lower() if me and me.username else None
