@@ -7,9 +7,11 @@ import json
 from pathlib import Path
 import os
 import threading
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from openai import AsyncOpenAI
 from contextlib import suppress
+from telegram.error import TelegramError
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import MessageEntityType
@@ -51,7 +53,7 @@ BOT_USERNAME_LOWER: Optional[str] = None
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # можно сделать простую проверку /health
+        # простой /health
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
@@ -71,6 +73,14 @@ def start_http_server():
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     logging.info(f"🌐 HTTP health server started on 0.0.0.0:{port}")
     server.serve_forever()
+
+
+# ========== Heartbeat, чтобы видеть, жив ли процесс ==========
+
+def heartbeat_loop():
+    while True:
+        logging.info("💓 Heartbeat: бот жив, время=%s", datetime.datetime.now())
+        time.sleep(30)
 
 
 # ========== Работа с цитатами ==========
@@ -98,27 +108,38 @@ def get_today_quote_file_id() -> Optional[str]:
     idx = num % len(quotes)
     return quotes[idx]
 
-# ========== Команды ==========
+
+# ========== Команды и OpenAI ==========
+
 async def send_long_text(update_or_message, text: str):
     msg = update_or_message.message if hasattr(update_or_message, "message") else update_or_message
     for i in range(0, len(text), TG_LIMIT):
         with suppress(Exception):
             await msg.reply_text(text[i:i+TG_LIMIT])
 
-async def ask_gipi(prompt: str, sys: str = "You are Gipi, a concise and friendly assistant. Answer in Russian by default.") -> str:
+
+async def ask_gipi(
+    prompt: str,
+    sys: str = "You are Gipi, a concise and friendly assistant. Answer in Russian by default."
+) -> str:
     if not client:
         return "❗️ OpenAI ключ не настроен на сервере."
     try:
         resp = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"system","content":sys},{"role":"user","content":prompt}],
+            model="gpt-4o-mini",  # если захочешь gpt-4o — просто поменяй тут
+            messages=[
+                {"role": "system", "content": sys},
+                {"role": "user", "content": prompt},
+            ],
             temperature=0.3,
             max_tokens=1200,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"⚠️ Ошибка при обращении к модели: {e}"
-async def ask_cmd(update, context):
+
+
+async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = (update.message.text or "").split(maxsplit=1)
     if len(parts) > 1:
         await update.message.chat.send_action("typing")
@@ -128,7 +149,8 @@ async def ask_cmd(update, context):
     context.user_data["awaiting_ask_text"] = True
     await update.message.reply_text("Окей, напиши вопрос одним следующим сообщением.")
 
-async def ask_followup_text(update, context):
+
+async def ask_followup_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_ask_text"):
         context.user_data["awaiting_ask_text"] = False
         q = (update.message.text or "").strip()
@@ -138,6 +160,10 @@ async def ask_followup_text(update, context):
         await update.message.chat.send_action("typing")
         answer = await ask_gipi(q)
         await send_long_text(update, answer)
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logging.exception("Unhandled error in handler", exc_info=context.error)
 
 
 async def addquote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -262,16 +288,15 @@ async def prepare_app():
     )
 
     # Команды
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("list2", list2_cmd))
     app.add_handler(CommandHandler("whoami", whoami_cmd))
     app.add_handler(CommandHandler("addquote", addquote_cmd))
     app.add_handler(CommandHandler("ask", ask_cmd))
+    app.add_error_handler(on_error)
 
-    # Упоминания — обрабатываем ВСЕ текстовые сообщения без команд,
-    # а внутри _mentioned_me уже решаем, есть ли имя бота
+    # Упоминания — обрабатываем ВСЕ текстовые сообщения без команд
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, mention_handler),
         group=0,
@@ -289,6 +314,9 @@ async def prepare_app():
     # Callback-кнопки
     app.add_handler(CallbackQueryHandler(on_button))
 
+    # Снимаем старый вебхук на всякий случай
+    await app.bot.delete_webhook(drop_pending_updates=False)
+
     me = await app.bot.get_me()
     BOT_USERNAME_LOWER = me.username.lower() if me and me.username else None
     logging.info(f"Bot username: @{me.username}")
@@ -302,12 +330,24 @@ def main():
     t = threading.Thread(target=start_http_server, daemon=True)
     t.start()
 
-    # 2. подготовим телеграм-приложение
-    loop = asyncio.get_event_loop()
-    app = loop.run_until_complete(prepare_app())
+    # 2. запустим heartbeat в отдельном потоке
+    hb = threading.Thread(target=heartbeat_loop, daemon=True)
+    hb.start()
 
-    # 3. запустим polling (блокирующий)
-    app.run_polling(drop_pending_updates=True)
+    # 3. подготовим телеграм-приложение и запустим polling
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        app = loop.run_until_complete(prepare_app())
+    except Exception as e:
+        logging.exception("Ошибка в prepare_app: %s", e)
+        return
+
+    try:
+        app.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        logging.exception("run_polling завершился с ошибкой: %s", e)
 
 
 if __name__ == "__main__":
